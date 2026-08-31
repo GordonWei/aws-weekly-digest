@@ -1,0 +1,14 @@
+# 無額外相依套件
+# 所有功能均使用 Python 標準函式庫 + boto3（Lambda 執行環境內建）
+#
+# 使用的標準函式庫：
+#   urllib.request  — HTTP 抓取 RSS Feed
+#   xml.etree       — XML / RSS 解析
+#   html            — HTML 實體解碼
+#   re              — Regex 處理
+#   json            — Bedrock API payload
+#   os              — 環境變數讀取
+#   datetime        — 日期計算
+#
+# AWS SDK（Lambda 內建，不需打包）：
+#   boto3           — Bedrock / SES / S3 / SSM

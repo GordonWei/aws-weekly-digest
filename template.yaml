@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: AWS Weekly Digest — 自動彙整 What's New + Blog，透過 Bedrock 分析後輸出至 SES / S3
+
+# ── 部署參數 ──────────────────────────────────────────────
+Parameters:
+  RecipientEmail:
+    Type: String
+    Description: 收件人 Email（需已在 SES 驗證）
+
+  SenderEmail:
+    Type: String
+    Description: 寄件人 Email（需已在 SES 驗證，與收件人可相同）
+
+  BedrockModelId:
+    Type: String
+    Description: Bedrock 模型 ID
+    Default: us.amazon.nova-pro-v1:0
+    AllowedValues:
+      - us.amazon.nova-pro-v1:0
+      - us.amazon.nova-lite-v1:0
+      - us.anthropic.claude-3-5-sonnet-20241022-v2:0
+      - us.anthropic.claude-3-haiku-20240307-v1:0
+
+  BedrockRegion:
+    Type: String
+    Description: Bedrock 所在區域（需在支援 Bedrock 的區域）
+    Default: us-east-1
+
+  # ── LLM Provider ─────────────────────────────────────────
+  # 預設 bedrock，行為與過去完全相同。改成 openai_compatible 時
+  # LlmBaseUrl / LlmModel 為必填，一套設定同時吃 Gemini / LM Studio / LiteLLM。
+  LlmProvider:
+    Type: String
+    Description: LLM 供應商（bedrock 或 openai_compatible）
+    Default: bedrock
+    AllowedValues: [bedrock, openai_compatible]
+
+  LlmBaseUrl:
+    Type: String
+    Description: 'OpenAI 相容端點（含 /v1），僅 openai_compatible 時需要'
+    Default: ''
+
+  LlmModel:
+    Type: String
+    Description: 'OpenAI 相容端點的模型名稱，僅 openai_compatible 時需要'
+    Default: ''
+
+  LlmApiKeyParam:
+    Type: String
+    Description: 'API key 的 SSM 參數路徑；設成空字串代表該端點不需認證（如本機 LM Studio）'
+    Default: /aws-weekly-digest/llm-api-key
+
+  DaysLookback:
+    Type: Number
+    Description: 回溯幾天的 What's New（建議 7）
+    Default: 7
+
+  # ── 功能開關 ─────────────────────────────────────────────
+  FeatureSendEmail:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  FeatureEmbedContent:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  FeatureSaveToS3:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+
+  FeaturePostToLinkedIn:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+  FeaturePostToWebhook:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
+# ── Globals ───────────────────────────────────────────────
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 300
+    MemorySize: 256
+    Architectures: [arm64]
+
+# ── 資源定義 ──────────────────────────────────────────────
+Resources:
+
+  # S3 Bucket（週報存檔）
+  DigestBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'aws-weekly-digest-${AWS::AccountId}'
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldDigests
+            Status: Enabled
+            ExpirationInDays: 365
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Lambda 執行角色
+  DigestFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'aws-weekly-digest-role-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DigestPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Bedrock — 呼叫 AI 模型
+              # 注意：BedrockModelId 若為 Cross-Region Inference Profile ID（如 us.amazon.nova-pro-v1:0），
+              # 實際呼叫時 IAM 會同時檢查「inference-profile」與其路由到的「底層 foundation-model」（不含 us. 前綴）
+              # 兩種資源的權限；底層模型會分散在多個 destination region（Nova/Claude 的 us. 系列固定為
+              # us-east-1 / us-east-2 / us-west-2，透過 GetInferenceProfile API 查證），
+              # 因此 foundation-model 的 Region 用萬用字元涵蓋，只鎖定明確的模型 ID（對應 AllowedValues）。
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - 'arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0'
+                  - 'arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0'
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0'
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
+                  - !Sub 'arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/*'
+              # SES — 寄信（限制只能從指定 Sender 寄出）
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    ses:FromAddress: !Ref SenderEmail
+              # S3 — 存檔
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub '${DigestBucket.Arn}/digests/*'
+              # SSM Parameter Store — LinkedIn Token / Webhook URL / LLM API Key
+              # 前綴萬用已涵蓋 LlmApiKeyParam 預設路徑，新增參數不需要改這條
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/aws-weekly-digest/*'
+
+  # Lambda 函式
+  DigestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: aws-weekly-digest
+      Description: 'AWS Weekly Digest — 自動彙整 What''s New + Bedrock 分析 + 多管道輸出'
+      CodeUri: .
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt DigestFunctionRole.Arn
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID:     !Ref BedrockModelId
+          BEDROCK_REGION:       !Ref BedrockRegion
+          LLM_PROVIDER:         !Ref LlmProvider
+          LLM_BASE_URL:         !Ref LlmBaseUrl
+          LLM_MODEL:            !Ref LlmModel
+          LLM_API_KEY_PARAM:    !Ref LlmApiKeyParam
+          RECIPIENT_EMAIL:      !Ref RecipientEmail
+          SENDER_EMAIL:         !Ref SenderEmail
+          S3_BUCKET:            !Ref DigestBucket
+          DAYS_LOOKBACK:        !Ref DaysLookback
+          MAX_WHATS_NEW:        '80'
+          FEATURE_SEND_EMAIL:      !Ref FeatureSendEmail
+          FEATURE_EMBED_CONTENT:   !Ref FeatureEmbedContent
+          FEATURE_SAVE_TO_S3:      !Ref FeatureSaveToS3
+          FEATURE_POST_TO_LINKEDIN: !Ref FeaturePostToLinkedIn
+          FEATURE_POST_TO_WEBHOOK:  !Ref FeaturePostToWebhook
+      # 手動測試時可用 URL（不對外公開）
+      # 正式觸發由 EventBridge Scheduler 負責
+
+  # EventBridge Scheduler 觸發角色
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'aws-weekly-digest-scheduler-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt DigestFunction.Arn
+
+  # EventBridge Scheduler — 每週五 17:00 Asia/Taipei（= UTC 09:00）
+  WeeklySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: aws-weekly-digest-friday
+      Description: '每週五 17:00 Asia/Taipei 產生 AWS Weekly Digest'
+      ScheduleExpression: 'cron(0 9 ? * FRI *)'
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'FLEXIBLE'
+        MaximumWindowInMinutes: 10
+      Target:
+        Arn: !GetAtt DigestFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 3600
+      State: ENABLED
+
+# ── 輸出值 ────────────────────────────────────────────────
+Outputs:
+  FunctionName:
+    Description: Lambda 函式名稱
+    Value: !Ref DigestFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionName'
+
+  FunctionArn:
+    Description: Lambda 函式 ARN
+    Value: !GetAtt DigestFunction.Arn
+
+  DigestBucketName:
+    Description: S3 存檔 Bucket 名稱
+    Value: !Ref DigestBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+
+  SchedulerName:
+    Description: EventBridge Scheduler 名稱
+    Value: !Ref WeeklySchedule
