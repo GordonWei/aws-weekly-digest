@@ -12,7 +12,11 @@ Gemini, a local LM Studio instance, a self-hosted LiteLLM — via a single
 `openai_compatible` provider, so there is no separate SDK per vendor.
 
 I built this because I kept meaning to read the AWS What's New feed and never
-did. It is a small personal tool, not a product.
+did. But keeping up with what shipped is only half of why I wanted to read it.
+The other half is what any of it means for the things I am already running —
+and that half never arrives on its own, because the feed does not know what I
+have. So the digest now also looks at my own account's usage and tells me what
+is worth fixing there. It is still a small personal tool, not a product.
 
 ## How it works
 
