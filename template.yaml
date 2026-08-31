@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
-Description: AWS Weekly Digest — pulls AWS What's New + Blog, runs them through Bedrock, ships the result to SES / S3
+Description: AWS Weekly Digest — what AWS shipped this week, plus what your own account's usage says is worth fixing. Lambda + Bedrock + Cost Explorer, delivered via SES and archived to S3
 
 # ── Deployment parameters ────────────────────────────────
 Parameters:

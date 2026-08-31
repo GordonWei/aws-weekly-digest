@@ -1,11 +1,11 @@
 # AWS Weekly Digest
 
-> **TL;DR** — A Lambda that runs every Friday, pulls the AWS What's New and
-> AWS News Blog RSS feeds for the past week, hands them to an LLM to write a
-> categorized digest, then emails it to you and archives a copy in S3.
-> Optionally it also reads **your own account's Cost Explorer usage** and adds a
-> section on what is worth fixing in it. Deployed with SAM. No dependencies
-> beyond boto3 and the Python standard library.
+> **TL;DR** — A Lambda that runs every Friday and does two things: it reads the
+> week's AWS What's New and News Blog feeds and writes you a categorized digest,
+> and it reads **your own account's Cost Explorer usage** and tells you what is
+> worth fixing in it. What shipped, and what it means for what you already run,
+> in one email. SES for delivery, S3 for the archive, deployed with SAM. No
+> dependencies beyond boto3 and the Python standard library.
 
 The LLM can be Amazon Bedrock (default) or any OpenAI-compatible endpoint —
 Gemini, a local LM Studio instance, a self-hosted LiteLLM — via a single
@@ -22,20 +22,29 @@ is worth fixing there. It is still a small personal tool, not a product.
 
 ```
   AWS What's New RSS  ─┐
-                       ├─→  Lambda (Python 3.12, arm64)  ─→  LLM  ─┬─→  SES  → your inbox
-  AWS News Blog RSS   ─┘         ▲            │                    └─→  S3   → digests/<date>/
-                                 │            └─→  Cost Explorer  ─→  LLM  ─→  advice section
-                                 │                 (optional)              (appended to the digest)
-                    EventBridge Scheduler (Fri 17:00 Asia/Taipei)
+                       ├─→ ┌──────────────────────────┐ ─→ LLM ─→ digest  ─┐
+  AWS News Blog RSS   ─┘   │  Lambda                  │                    ├─→ SES → your inbox
+                           │  (Python 3.12, arm64)    │                    └─→ S3  → digests/<date>/
+  Cost Explorer  ────────→ └──────────────────────────┘ ─→ LLM ─→ advice  ─┘
+  (your account's usage)              ▲
+                        EventBridge Scheduler (Fri 17:00 Asia/Taipei)
 ```
 
-The digest itself is the same for everyone. The optional **account advice**
-section is the part that is specific to you: it reads which services and usage
-types your account actually billed over the last 90 days and says what is worth
-fixing — idle IPv4 addresses, clusters on extended support, NAT gateways left
-behind, provisioned capacity nothing is using. Off by default
-(`FEATURE_ACCOUNT_ADVICE`); see [Account advice](#account-advice-off-by-default)
-for how it works and why it is built on usage types rather than spend.
+Two halves, one email. The **digest** half is the same for everybody: what AWS
+shipped this week, categorized. The **advice** half is the one only your account
+can produce — it reads which services and usage types you actually billed over
+the last 90 days and says what is worth fixing: idle IPv4 addresses, clusters on
+extended support, NAT gateways left behind, provisioned capacity nothing is
+using.
+
+Neither half is the point on its own. Knowing what AWS released does not tell
+you whether it matters to you, and a feed cannot tell you that because it does
+not know what you have.
+
+The advice half ships switched off — it costs a little money to run and needs an
+IAM permission the digest does not, so turning it on should be your decision
+rather than a surprise on your bill. See [Account advice](#account-advice) for
+how to enable it, and why it is built on usage types rather than spend.
 
 Two optional output channels — LinkedIn and a generic webhook — are wired up
 but off by default. See the feature flags below.
@@ -93,12 +102,13 @@ Feature flags: `FEATURE_SEND_EMAIL`, `FEATURE_EMBED_CONTENT`,
 `FEATURE_SAVE_TO_S3`, `FEATURE_POST_TO_LINKEDIN`, `FEATURE_POST_TO_WEBHOOK`,
 `FEATURE_ACCOUNT_ADVICE`.
 
-### Account advice (off by default)
+### Account advice
 
-`FEATURE_ACCOUNT_ADVICE=true` appends a section that reads your account's own
-Cost Explorer usage and says what is worth fixing. It needs `ce:GetCostAndUsage`
-(already in the template) and costs $0.01 per Cost Explorer call plus one extra
-model invocation — around $9/year at one run a week on Claude Opus 5.
+Set `FEATURE_ACCOUNT_ADVICE=true` to turn this half on. It needs
+`ce:GetCostAndUsage` (already in the template) and costs $0.01 per Cost Explorer
+call plus one extra model invocation — around $9/year at one run a week on
+Claude Opus 5. That is the whole reason it ships off: it spends money and widens
+the IAM policy, and neither should happen to you by default.
 
 It is built on **usage types**, not spend. A list of service names gives a model
 nothing to reason from but the names, and it will write "you may not have
@@ -140,9 +150,10 @@ template default rather than telling you. Pass the whole set every time.
 One setting covers everything a reader sees. The email wrapper — subject lines,
 the counts under the header, the footer, the plain-text part, the failure
 notification — comes from `_EMAIL_STRINGS` keyed on the same value, so you never
-end up with an English digest inside a Chinese-labelled email. Code comments and
-CloudWatch log lines stay in English regardless; those are for whoever is
-reading the repo, not for the recipient.
+end up with an English digest inside a Chinese-labelled email. The advice
+section follows the same value through `_ADVICE_PROMPTS` in
+`account_context.py`. Code comments and CloudWatch log lines stay in English
+regardless; those are for whoever is reading the repo, not for the recipient.
 
 Each language has its own prompt in `lambda_function.py` (`_prompt_en`,
 `_prompt_zh_tw`) rather than one English prompt with "reply in X" appended. The
@@ -150,11 +161,13 @@ section headings and per-item field names are part of the output contract — th
 Markdown-to-HTML and Markdown-to-LinkedIn converters read that structure back —
 so they have to be written in the target language to come back reliably.
 
-To add a language, write a builder and register it in `_PROMPT_BUILDERS`, add
-the matching entry to `_EMAIL_STRINGS`, then add the value to `AllowedValues` on
-`DigestLanguage` in `template.yaml`. An
-unknown value raises at run time rather than silently producing something in the
-wrong language.
+To add a language: write a builder and register it in `_PROMPT_BUILDERS`, add
+the matching entry to `_EMAIL_STRINGS`, add an advice-prompt builder to
+`_ADVICE_PROMPTS` in `account_context.py`, then add the value to `AllowedValues`
+on `DigestLanguage` in `template.yaml`. Miss the third one and the digest
+arrives in the new language with the advice section still in English — an
+unknown language raises at run time, but a *missing* one there returns a warning
+and no section, which is quieter than it sounds.
 
 ## Two traps worth knowing about
 

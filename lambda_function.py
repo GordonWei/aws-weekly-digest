@@ -1,10 +1,16 @@
 """
 AWS Weekly Digest — Lambda Function
 
-Pulls AWS What's New and the AWS News Blog for the past week, hands them to an
-LLM to write a categorized digest, then emails it and archives a copy in S3.
+Answers two questions in one email: what did AWS ship this week, and what does
+that mean for what you are already running.
 
-Lambda + Bedrock (or any OpenAI-compatible endpoint) + SES + S3.
+The first half pulls AWS What's New and the AWS News Blog for the past week and
+hands them to an LLM to write a categorized digest. The second half reads this
+account's own Cost Explorer usage and appends advice on what is worth fixing in
+it (see account_context.py; enabled with FEATURE_ACCOUNT_ADVICE). A feed cannot
+supply the second half on its own, because it does not know what you have.
+
+Lambda + Bedrock (or any OpenAI-compatible endpoint) + Cost Explorer + SES + S3.
 """
 
 import json

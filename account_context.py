@@ -1,10 +1,14 @@
 """
 Account-aware advice section for the digest.
 
-The digest on its own reads the same whether you run a hundred accounts or none.
-This adds one section on the end: given what this account actually uses, what is
-worth improving? Nothing else about the digest changes, and the whole thing is
-off unless FEATURE_ACCOUNT_ADVICE says otherwise.
+The digest half of this tool tells you what AWS shipped. This is the other half:
+given what this account actually uses, what is worth fixing? A release feed
+cannot answer that, because it does not know what you have — which is the whole
+reason this module exists rather than being a nicer prompt on the digest.
+
+It runs only when FEATURE_ACCOUNT_ADVICE is set, because it spends money
+(Cost Explorer is billed per call) and needs an IAM permission the digest does
+not. That is a deployment default, not a statement about how central it is.
 
 Three decisions worth knowing before you read the code, each of which came from
 something that went wrong on the way:
