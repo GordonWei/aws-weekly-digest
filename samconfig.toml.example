@@ -1,6 +1,6 @@
-# 複製成 samconfig.toml 後填入自己的值：
+# Copy this to samconfig.toml and fill in your own values:
 #   cp samconfig.toml.example samconfig.toml
-# samconfig.toml 已列入 .gitignore，不會被 commit。
+# samconfig.toml is in .gitignore, so it never gets committed.
 version = 0.1
 
 [default.deploy.parameters]
@@ -10,11 +10,15 @@ s3_prefix = "aws-weekly-digest"
 region = "ap-northeast-1"
 confirm_changeset = true
 
-# 注意是 CAPABILITY_NAMED_IAM 不是 CAPABILITY_IAM——
-# template 裡明確指定了 IAM RoleName，這會把要求升級成 NAMED 版本。
+# CAPABILITY_NAMED_IAM, not CAPABILITY_IAM — the template pins an explicit IAM
+# RoleName, and that alone upgrades the requirement to the NAMED variant.
 capabilities = "CAPABILITY_NAMED_IAM"
 
-# RecipientEmail / SenderEmail 兩個位址都必須先在 SES 完成驗證。
-# 沙盒模式下寄件與收件都要驗證；兩者可以填同一個位址。
-parameter_overrides = "RecipientEmail=\"you@example.com\" SenderEmail=\"you@example.com\" BedrockModelId=\"us.amazon.nova-pro-v1:0\" BedrockRegion=\"us-east-1\" DaysLookback=\"7\" FeatureSendEmail=\"true\" FeatureEmbedContent=\"true\" FeatureSaveToS3=\"true\" FeaturePostToLinkedIn=\"false\" FeaturePostToWebhook=\"false\""
+# Both RecipientEmail and SenderEmail must be verified identities in SES.
+# In the sandbox you verify both ends; they can be the same address.
+#
+# Careful: parameter_overrides is one flat string. Drop a parameter from it and
+# CloudFormation silently falls back to the template default instead of telling
+# you anything — pass all of them every time.
+parameter_overrides = "RecipientEmail=\"you@example.com\" SenderEmail=\"you@example.com\" BedrockModelId=\"us.amazon.nova-pro-v1:0\" BedrockRegion=\"us-east-1\" DaysLookback=\"7\" FeatureSendEmail=\"true\" FeatureEmbedContent=\"true\" FeatureSaveToS3=\"true\" FeaturePostToLinkedIn=\"false\" FeaturePostToWebhook=\"false\" DigestLanguage=\"en\""
 image_repositories = []

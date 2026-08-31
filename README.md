@@ -69,9 +69,41 @@ All settings are environment variables on the Lambda, set through SAM parameters
 | `LLM_MODEL` | `''` | Required for `openai_compatible` |
 | `LLM_API_KEY_PARAM` | `/aws-weekly-digest/llm-api-key` | SSM path. Set to empty string to declare "no auth needed" (e.g. local LM Studio) |
 | `LLM_TIMEOUT` | `240` | Seconds. Lambda timeout is 300 |
+| `DIGEST_LANGUAGE` | `en` | `en` or `zh-TW`. See below |
 
 Feature flags: `FEATURE_SEND_EMAIL`, `FEATURE_EMBED_CONTENT`,
 `FEATURE_SAVE_TO_S3`, `FEATURE_POST_TO_LINKEDIN`, `FEATURE_POST_TO_WEBHOOK`.
+
+### Digest language
+
+`DIGEST_LANGUAGE` picks the language the digest is written in. It defaults to
+`en`; the other value shipped today is `zh-TW` (Traditional Chinese).
+
+Set it through the SAM parameter, same as everything else:
+
+```bash
+sam deploy --parameter-overrides 'DigestLanguage="zh-TW" ...'
+```
+
+Careful with that: `parameter_overrides` in `samconfig.toml` is one flat string,
+and dropping a parameter from it makes CloudFormation quietly fall back to the
+template default rather than telling you. Pass the whole set every time.
+
+The email wrapper — subject line, the counts under the header, the footer —
+follows the same setting (`_EMAIL_STRINGS`), so you do not end up with an
+English digest inside a Chinese-labelled email.
+
+Each language has its own prompt in `lambda_function.py` (`_prompt_en`,
+`_prompt_zh_tw`) rather than one English prompt with "reply in X" appended. The
+section headings and per-item field names are part of the output contract — the
+Markdown-to-HTML and Markdown-to-LinkedIn converters read that structure back —
+so they have to be written in the target language to come back reliably.
+
+To add a language, write a builder and register it in `_PROMPT_BUILDERS`, add
+the matching entry to `_EMAIL_STRINGS`, then add the value to `AllowedValues` on
+`DigestLanguage` in `template.yaml`. An
+unknown value raises at run time rather than silently producing something in the
+wrong language.
 
 ## Two traps worth knowing about
 

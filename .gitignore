@@ -1,7 +1,8 @@
-# 部署設定（含真實 email / 帳號資訊）——用 samconfig.toml.example 當範本
+# Deploy config — holds a real email address and account details.
+# Start from samconfig.toml.example instead.
 samconfig.toml
 
-# SAM / Python 建置產物
+# SAM / Python build artifacts
 .aws-sam/
 __pycache__/
 *.py[cod]
@@ -9,7 +10,7 @@ __pycache__/
 .venv/
 venv/
 
-# 內部專案文件（含部署帳號與環境細節，不對外）
+# Internal working notes (deployment account, environment specifics) — not for publication
 WEEKLY_UPDATE.md
 
 # OS

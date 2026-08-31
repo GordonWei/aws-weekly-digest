@@ -1,7 +1,10 @@
 """
 AWS Weekly Digest — Lambda Function
-自動彙整 AWS What's New + Blog → Bedrock AI 分析 → 多管道輸出
-V1：Lambda + Bedrock + SES + S3
+
+Pulls AWS What's New and the AWS News Blog for the past week, hands them to an
+LLM to write a categorized digest, then emails it and archives a copy in S3.
+
+Lambda + Bedrock (or any OpenAI-compatible endpoint) + SES + S3.
 """
 
 import json
@@ -15,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import boto3
 
-# ── 設定（環境變數驅動）──────────────────────────────────────
+# ── Configuration (entirely environment-driven) ─────────────
 CONFIG = {
     'BEDROCK_MODEL_ID': os.environ.get('BEDROCK_MODEL_ID', 'us.amazon.nova-pro-v1:0'),
     'RECIPIENT_EMAIL':  os.environ.get('RECIPIENT_EMAIL', ''),
@@ -25,19 +28,28 @@ CONFIG = {
     'MAX_WHATS_NEW':    int(os.environ.get('MAX_WHATS_NEW', '80')),
     'BEDROCK_REGION':   os.environ.get('BEDROCK_REGION', 'us-east-1'),
 
-    # ── LLM Provider ────────────────────────────────────────
-    # 'bedrock'（預設，行為與過去完全相同）或 'openai_compatible'
-    # openai_compatible 一套設定同時吃 Gemini（OpenAI 相容端點）、
-    # 本機 LM Studio（原生相容）、自架 LiteLLM，不必為每家各寫一個 SDK。
+    # Language the digest is written in. Each value has its own prompt (see
+    # _PROMPT_BUILDERS); this is not a "reply in X" suffix bolted onto one
+    # English prompt.
+    'DIGEST_LANGUAGE':  os.environ.get('DIGEST_LANGUAGE', 'en'),
+
+    # ── LLM provider ────────────────────────────────────────
+    # 'bedrock' (the default, and behaves exactly as it always has) or
+    # 'openai_compatible'. The second one covers Gemini, a local LM Studio and
+    # a self-hosted LiteLLM through the same code path, so there is no separate
+    # SDK per vendor.
     'LLM_PROVIDER':      os.environ.get('LLM_PROVIDER', 'bedrock'),
     'LLM_BASE_URL':      os.environ.get('LLM_BASE_URL', ''),
     'LLM_MODEL':         os.environ.get('LLM_MODEL', ''),
-    # API key 存 SSM（比照 LinkedIn token）。刻意設成空字串＝明確宣告不需要認證
-    # （例如本機 LM Studio）；維持預設路徑但參數不存在則視為設定錯誤，直接失敗。
+    # The API key lives in SSM, same as the LinkedIn token. Setting this to an
+    # empty string is how you declare "this endpoint needs no auth" — a local
+    # LM Studio, say. Leaving the default path in place but never creating the
+    # parameter is a misconfiguration, and it fails loudly instead of quietly
+    # going out unauthenticated.
     'LLM_API_KEY_PARAM': os.environ.get('LLM_API_KEY_PARAM', '/aws-weekly-digest/llm-api-key'),
     'LLM_TIMEOUT':       int(os.environ.get('LLM_TIMEOUT', '240')),
 
-    # ── 輸出管道開關（false = 預留，代碼已就位）────────────
+    # ── Output channels (false = wired up but switched off) ─
     'FEATURES': {
         'SEND_EMAIL':             os.environ.get('FEATURE_SEND_EMAIL',      'true') == 'true',
         'EMBED_CONTENT_IN_EMAIL': os.environ.get('FEATURE_EMBED_CONTENT',   'true') == 'true',
@@ -49,29 +61,29 @@ CONFIG = {
 
 
 # ────────────────────────────────────────────────────────────
-# 主程式
+# Entry point
 # ────────────────────────────────────────────────────────────
 def lambda_handler(event, context):
-    print('開始產生 AWS Weekly Digest...')
+    print('Generating AWS Weekly Digest...')
     try:
         whats_new  = fetch_aws_whats_new()
         blog_posts = fetch_aws_blog_posts()
-        print(f"抓取完成：{len(whats_new)} 條 What's New，{len(blog_posts)} 篇 Blog")
+        print(f"Fetched {len(whats_new)} What's New items and {len(blog_posts)} blog posts")
 
         if not whats_new:
-            raise ValueError("本週 What's New 為空，請確認 RSS Feed 是否正常。")
+            raise ValueError("No What's New items for this week — check whether the RSS feed is healthy.")
 
         digest_content = generate_digest(whats_new, blog_posts)
-        print(f"{CONFIG['LLM_PROVIDER']} 分析完成")
+        print(f"{CONFIG['LLM_PROVIDER']} finished the analysis")
 
         s3_url = None
         if CONFIG['FEATURES']['SAVE_TO_S3'] and CONFIG['S3_BUCKET']:
             s3_url = save_to_s3(digest_content)
-            print(f'S3 存檔：{s3_url}')
+            print(f'Archived to S3: {s3_url}')
 
         if CONFIG['FEATURES']['SEND_EMAIL']:
             send_email(digest_content, s3_url, len(whats_new), len(blog_posts))
-            print('Email 已寄出')
+            print('Email sent')
 
         if CONFIG['FEATURES']['POST_TO_LINKEDIN']:
             post_to_linkedin(digest_content)
@@ -79,17 +91,17 @@ def lambda_handler(event, context):
         if CONFIG['FEATURES']['POST_TO_WEBHOOK']:
             post_to_webhook(digest_content, s3_url)
 
-        print('完成！')
+        print('Done.')
         return {'statusCode': 200, 'body': 'OK'}
 
     except Exception as e:
-        print(f'錯誤：{e}')
+        print(f'Failed: {e}')
         _send_error_email(str(e))
         raise
 
 
 # ────────────────────────────────────────────────────────────
-# 資料抓取：AWS What's New RSS
+# Fetch: AWS What's New RSS
 # ────────────────────────────────────────────────────────────
 def fetch_aws_whats_new():
     url = 'https://aws.amazon.com/about-aws/whats-new/recent/feed/'
@@ -122,12 +134,12 @@ def fetch_aws_whats_new():
         return items[:CONFIG['MAX_WHATS_NEW']]
 
     except Exception as e:
-        print(f"[What's New] 抓取失敗：{e}")
+        print(f"[What's New] fetch failed: {e}")
         return []
 
 
 # ────────────────────────────────────────────────────────────
-# 資料抓取：AWS Blog RSS（失敗靜默跳過）
+# Fetch: AWS News Blog RSS (soft-fails on purpose — see the except below)
 # ────────────────────────────────────────────────────────────
 def fetch_aws_blog_posts():
     url = 'https://aws.amazon.com/blogs/aws/feed/'
@@ -140,10 +152,13 @@ def fetch_aws_blog_posts():
         if start == -1:
             return []
 
-        # 移除 namespace 宣告，避免 ElementTree 解析問題
-        # 注意：只刪 xmlns 宣告不夠——items 裡仍有 <dc:creator>、<content:encoded> 等
-        # 帶 prefix 的標籤，宣告一消失 ElementTree 就會拋出 "unbound prefix"。
-        # 這裡把標籤的 prefix 也一併剝掉（反正只取 title/link/description/pubDate，用不到那些欄位）。
+        # Strip the namespace declarations so ElementTree stops choking on them.
+        # Stripping only the xmlns declarations is not enough, and that is exactly
+        # the bug this project shipped with: every item still carries prefixed tags
+        # like <dc:creator> and <content:encoded>, so the moment the declarations
+        # are gone ElementTree throws "unbound prefix". The tag prefixes therefore
+        # get stripped too — nothing below reads those fields anyway, only
+        # title/link/description/pubDate.
         clean = re.sub(r'\s+xmlns(?::[a-z]+)?="[^"]*"', '', raw[start:])
         clean = re.sub(r'</?[a-zA-Z0-9]+:', lambda m: m.group(0).replace(':', ''), clean)
         root    = ET.fromstring(clean)
@@ -166,14 +181,118 @@ def fetch_aws_blog_posts():
         return items[:15]
 
     except Exception as e:
-        print(f'[Blog] 跳過：{e}')
+        print(f'[Blog] skipped: {e}')
         return []
 
 
 # ────────────────────────────────────────────────────────────
-# Bedrock AI 呼叫（支援 Nova 與 Claude 系列）
+# Prompt assembly and digest generation
+#
+# The digest language is a deployment parameter, not something baked into the
+# code. Each language gets its own prompt rather than an English prompt with
+# "reply in X" bolted on the end — the section headings and the per-item fields
+# are part of the output contract, so they have to be written in the target
+# language to come back reliably.
+#
+# Adding a language means writing a builder and registering it in
+# _PROMPT_BUILDERS below. Nothing else needs to change.
 # ────────────────────────────────────────────────────────────
-def generate_digest(whats_new, blog_posts):
+def _prompt_en(whats_new, blog_posts):
+    today      = _fmt_date(datetime.now())
+    week_range = _week_range()
+
+    wn_text = '\n\n'.join(
+        f"[WN{i+1}] {item['title']}\nSummary: {item['summary']}\nLink: {item['link']}"
+        for i, item in enumerate(whats_new)
+    )
+    blog_text = '\n\n'.join(
+        f"[B{i+1}] {item['title']}\n{item['description']}\nLink: {item['link']}"
+        for i, item in enumerate(blog_posts)
+    ) if blog_posts else '(no new blog posts this week)'
+
+    return f"""You are a principal cloud architect who knows Amazon Web Services deeply, and a strong technical writer.
+Using this week's ({week_range}) AWS What's New entries and blog posts below, write a digest suitable for sharing with a technical audience.
+Output the digest itself and nothing else — no preamble, no introduction, no commentary about what you are doing.
+
+## AWS What's New ({len(whats_new)} entries)
+{wn_text}
+
+## AWS Blog Posts ({len(blog_posts)} posts)
+{blog_text}
+
+---
+
+## Output format (follow it exactly, write in English, no emoji in headings)
+
+# AWS Weekly Digest | {today}
+
+> This week: [2-3 sentences: which services shipped something significant, the overall direction of the week, anything that moves cost or architecture]
+
+---
+
+## By the numbers
+- Compute (EC2 / Lambda / Container): N
+- Storage & Database (S3 / RDS / DynamoDB): N
+- AI & Machine Learning (Bedrock / SageMaker): N
+- Networking & Security (VPC / CloudFront / IAM / WAF): N
+- Data & Analytics (Redshift / Athena / Kinesis): N
+- Developer Tools & Other: N
+
+---
+
+## Compute (EC2 / Lambda / Container)
+
+### [feature name]
+**In one line**: [what this update actually does]
+**Why it matters**: [the real effect on an engineer or a business, under 30 words]
+**Cost impact**: [none / reduces cost / adds cost / needs evaluation]
+**Status**: [GA / Preview / Deprecated]
+**Availability**: [global / selected regions / specific region names]
+**Official link**: [the corresponding link]
+
+[List the 3-6 most important updates in this category. Skip pure documentation fixes.]
+
+---
+
+## Storage & Database (S3 / RDS / DynamoDB)
+[same format, 3-6 entries]
+
+---
+
+## AI & Machine Learning (Bedrock / SageMaker)
+[same format, 3-6 entries]
+
+---
+
+## Networking & Security (VPC / CloudFront / IAM / WAF)
+[same format, 3-5 entries]
+
+---
+
+## Data & Analytics (Redshift / Athena / Kinesis)
+[same format, 3-5 entries]
+
+---
+
+## Developer Tools & Other
+[same format, 3-5 entries]
+
+---
+
+## Blog picks
+[The 2-3 posts most worth reading, formatted as: **title**: one line on why it is worth your time -> link]
+
+---
+
+## Architect's take
+[Pick the single update most worth paying attention to this week and explain what it really means for an enterprise cloud architect. Around 100 words, first person, "I think...". Call out any cost impact explicitly.]
+
+---
+AWS Weekly Digest Bot | {today}
+"""
+
+
+def _prompt_zh_tw(whats_new, blog_posts):
     today      = _fmt_date(datetime.now())
     week_range = _week_range()
 
@@ -186,7 +305,7 @@ def generate_digest(whats_new, blog_posts):
         for i, item in enumerate(blog_posts)
     ) if blog_posts else '（本週無新 Blog）'
 
-    prompt = f"""你是一位精通 Amazon Web Services 的首席雲端架構師，同時也是優秀的技術寫作者。
+    return f"""你是一位精通 Amazon Web Services 的首席雲端架構師，同時也是優秀的技術寫作者。
 請根據以下本週（{week_range}）的 AWS What's New 和 Blog，整理一份供技術社群分享的週報。
 請直接輸出週報內容，不要有任何前言、自我介紹或說明文字。
 
@@ -267,18 +386,39 @@ def generate_digest(whats_new, blog_posts):
 AWS Weekly Digest Bot｜{today}
 """
 
-    return _invoke_llm(prompt)
+
+_PROMPT_BUILDERS = {
+    'en':    _prompt_en,
+    'zh-TW': _prompt_zh_tw,
+}
+
+
+def generate_digest(whats_new, blog_posts):
+    lang    = CONFIG['DIGEST_LANGUAGE']
+    builder = _PROMPT_BUILDERS.get(lang)
+    if builder is None:
+        raise ValueError(
+            f"Unknown DIGEST_LANGUAGE: {lang!r} "
+            f"(expected one of {', '.join(sorted(_PROMPT_BUILDERS))})"
+        )
+    return _invoke_llm(builder(whats_new, blog_posts))
 
 
 # ────────────────────────────────────────────────────────────
-# LLM 呼叫層
+# LLM call layer
 #
-# 這一層刻意「失敗就拋例外」，不做優雅降級。
-# 原因是本專案 V1 的真實 bug 就出在相反的寫法：一個為了容錯而寫的 except
-# 靜默吞掉解析錯誤，於是每次執行都回 200、信照寄、S3 照寫，只有一個區塊
-# 永遠是空的，唯一症狀是一行沒人有理由去看的 CloudWatch log。
-# 摘要內容是這封信的全部價值，拿不到就該讓整個執行失敗——lambda_handler
-# 的 except 會寄出錯誤通知信並 re-raise，那才是應有的行為。
+# This layer raises on failure on purpose. No graceful degradation here.
+#
+# The reason is the real bug this project shipped with, which was the opposite
+# pattern: an except block written for resilience quietly swallowed a parser
+# error. Every invoke returned 200. Email sent, S3 file written, StatusCode 200
+# all the way down — with one section permanently empty. The only symptom
+# anywhere was a single CloudWatch log line you would have to already suspect
+# something to go and read.
+#
+# The summary is the entire value of the email. If it cannot be produced the run
+# should fail: the except in lambda_handler sends an error notification and
+# re-raises, which is the behaviour you actually want.
 # ────────────────────────────────────────────────────────────
 MAX_TOKENS  = 8192
 TEMPERATURE = 0.3
@@ -291,7 +431,7 @@ def _invoke_llm(prompt):
     if provider == 'openai_compatible':
         return _invoke_openai_compatible(prompt)
     raise ValueError(
-        f"未知的 LLM_PROVIDER：{provider!r}（可用：bedrock / openai_compatible）"
+        f"Unknown LLM_PROVIDER: {provider!r} (expected 'bedrock' or 'openai_compatible')"
     )
 
 
@@ -320,18 +460,20 @@ def _invoke_bedrock(prompt):
 
 
 # ────────────────────────────────────────────────────────────
-# OpenAI 相容端點（Gemini / LM Studio / 自架 LiteLLM 共用同一段）
+# OpenAI-compatible endpoints — Gemini, LM Studio and a self-hosted LiteLLM all
+# go through this one function.
 #
-# 設定方式：
+# Configure it with:
 #   LLM_PROVIDER=openai_compatible
-#   LLM_BASE_URL=<端點，含 /v1；結尾有沒有斜線都可以>
-#   LLM_MODEL=<模型名稱>
-#   LLM_API_KEY_PARAM=<SSM 參數路徑，預設 /aws-weekly-digest/llm-api-key>
-#                      設成空字串代表「這個端點不需要認證」（例如本機 LM Studio）
+#   LLM_BASE_URL=<endpoint including /v1; a trailing slash is fine either way>
+#   LLM_MODEL=<model name>
+#   LLM_API_KEY_PARAM=<SSM parameter path, defaults to /aws-weekly-digest/llm-api-key>
+#                      an empty string means "this endpoint needs no auth"
 #
-# 已知端點：
+# Endpoints known to work:
 #   Gemini     https://generativelanguage.googleapis.com/v1beta/openai
-#   LM Studio  http://<host>:1234/v1        ← Lambda 在雲上，需要對外可達的位址
+#   LM Studio  http://<host>:1234/v1   <- the Lambda runs in AWS, so this has to
+#                                         be an address reachable from there
 #   LiteLLM    http://<host>:4000/v1
 # ────────────────────────────────────────────────────────────
 def _invoke_openai_compatible(prompt):
@@ -341,20 +483,22 @@ def _invoke_openai_compatible(prompt):
     missing = [k for k, v in (('LLM_BASE_URL', base_url), ('LLM_MODEL', model)) if not v]
     if missing:
         raise ValueError(
-            f"LLM_PROVIDER=openai_compatible 但缺少必要設定：{', '.join(missing)}"
+            f"LLM_PROVIDER=openai_compatible but required settings are missing: {', '.join(missing)}"
         )
 
     headers = {'Content-Type': 'application/json'}
     key_param = CONFIG['LLM_API_KEY_PARAM']
     if key_param:
-        # 參數路徑有設就必須拿得到——拿不到是設定錯誤，不是可以略過的情況
+        # A configured parameter path has to resolve. Failing to read it is a
+        # misconfiguration, not something to shrug off and continue without.
         ssm = boto3.client('ssm')
         try:
             api_key = ssm.get_parameter(Name=key_param, WithDecryption=True)['Parameter']['Value']
         except Exception as e:
             raise RuntimeError(
-                f'讀取 SSM 參數 {key_param} 失敗：{e}。'
-                f'若該端點本來就不需要認證，請把 LLM_API_KEY_PARAM 設成空字串明確宣告。'
+                f'Could not read SSM parameter {key_param}: {e}. '
+                f'If this endpoint genuinely needs no auth, set LLM_API_KEY_PARAM '
+                f'to an empty string to say so explicitly.'
             ) from e
         headers['Authorization'] = f'Bearer {api_key}'
 
@@ -373,25 +517,25 @@ def _invoke_openai_compatible(prompt):
             raw = resp.read().decode('utf-8', errors='replace')
     except urllib.error.HTTPError as e:
         detail = e.read().decode('utf-8', errors='replace')[:500]
-        raise RuntimeError(f'{model} 回應 HTTP {e.code}：{detail}') from e
+        raise RuntimeError(f'{model} returned HTTP {e.code}: {detail}') from e
     except Exception as e:
-        raise RuntimeError(f'呼叫 {url} 失敗：{e}') from e
+        raise RuntimeError(f'Call to {url} failed: {e}') from e
 
     try:
         result  = json.loads(raw)
         content = result['choices'][0]['message']['content']
     except Exception as e:
-        raise RuntimeError(f'{model} 回應格式非預期：{raw[:500]}') from e
+        raise RuntimeError(f'Unexpected response shape from {model}: {raw[:500]}') from e
 
     if not content or not content.strip():
-        raise RuntimeError(f'{model} 回應內容為空（finish_reason='
-                           f'{result["choices"][0].get("finish_reason")!r}）')
+        raise RuntimeError(f'{model} returned empty content (finish_reason='
+                           f'{result["choices"][0].get("finish_reason")!r})')
 
     return content
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 A：S3 存檔
+# Output A: S3 archive
 # ────────────────────────────────────────────────────────────
 def save_to_s3(content):
     today   = _fmt_date(datetime.now(), '%Y-%m-%d')
@@ -405,11 +549,41 @@ def save_to_s3(content):
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 B：Email（SES，含完整 HTML 內容）
+# Output B: email via SES, with the digest inlined as HTML
+#
+# The wrapper text follows DIGEST_LANGUAGE too. An English digest inside a
+# Chinese-labelled email reads like a bug, so the chrome and the content stay in
+# step. Falls back to English for a language that has a prompt but no strings
+# here yet.
 # ────────────────────────────────────────────────────────────
+_EMAIL_STRINGS = {
+    'en': {
+        's3_link':      'Raw archive in S3',
+        'subhead':      "{today} | {wn_count} What's New, {blog_count} blog posts",
+        'footer':       'AWS Weekly Digest Bot — generated automatically, read it before you share it',
+        'text_part':    'AWS Weekly Digest {today}\n(this email is meant to be read as HTML)',
+        'error_subject':'[AWS] Weekly Digest failed',
+        'error_body':   'Error: {error_msg}',
+    },
+    'zh-TW': {
+        's3_link':      'S3 原始存檔',
+        'subhead':      "{today}｜What's New {wn_count} 條，Blog {blog_count} 篇",
+        'footer':       'AWS Weekly Digest Bot｜自動產生，請審閱後再分享',
+        'text_part':    'AWS Weekly Digest {today}\n（請以 HTML 郵件查看）',
+        'error_subject':'[AWS] Weekly Digest 產生失敗',
+        'error_body':   '錯誤：{error_msg}',
+    },
+}
+
+
+def _email_strings():
+    return _EMAIL_STRINGS.get(CONFIG['DIGEST_LANGUAGE'], _EMAIL_STRINGS['en'])
+
+
 def send_email(digest_content, s3_url, wn_count, blog_count):
     today   = _fmt_date(datetime.now())
-    s3_link = (f'<p style="margin:12px 0"><a href="{s3_url}" style="color:#FF9900;font-weight:600">S3 原始存檔</a></p>'
+    t       = _email_strings()
+    s3_link = (f'<p style="margin:12px 0"><a href="{s3_url}" style="color:#FF9900;font-weight:600">{t["s3_link"]}</a></p>'
                if s3_url else '')
     body_html = markdown_to_html(digest_content) if CONFIG['FEATURES']['EMBED_CONTENT_IN_EMAIL'] else ''
 
@@ -417,13 +591,13 @@ def send_email(digest_content, s3_url, wn_count, blog_count):
 <div style="font-family:-apple-system,Arial,sans-serif;max-width:680px;margin:0 auto;color:#232F3E">
   <div style="background:#232F3E;padding:20px 32px;border-radius:8px 8px 0 0">
     <h1 style="margin:0;color:white;font-size:20px;font-weight:700">AWS Weekly Digest</h1>
-    <p style="margin:6px 0 0;color:#FF9900;font-size:14px">{today}｜What's New {wn_count} 條，Blog {blog_count} 篇</p>
+    <p style="margin:6px 0 0;color:#FF9900;font-size:14px">{t["subhead"].format(today=today, wn_count=wn_count, blog_count=blog_count)}</p>
   </div>
   <div style="background:#fff;padding:24px 32px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px">
     {s3_link}
     <div style="margin-top:16px">{body_html}</div>
     <p style="margin:24px 0 0;font-size:12px;color:#999;border-top:1px solid #f0f0f0;padding-top:12px">
-      AWS Weekly Digest Bot｜自動產生，請審閱後再分享
+      {t["footer"]}
     </p>
   </div>
 </div>"""
@@ -436,7 +610,7 @@ def send_email(digest_content, s3_url, wn_count, blog_count):
             'Subject': {'Data': f'[AWS] Weekly Digest {today}', 'Charset': 'UTF-8'},
             'Body': {
                 'Html': {'Data': html_body,                        'Charset': 'UTF-8'},
-                'Text': {'Data': f'AWS Weekly Digest {today}\n（請以 HTML 郵件查看）', 'Charset': 'UTF-8'},
+                'Text': {'Data': t['text_part'].format(today=today), 'Charset': 'UTF-8'},
             },
         },
     )
@@ -444,28 +618,29 @@ def send_email(digest_content, s3_url, wn_count, blog_count):
 
 def _send_error_email(error_msg):
     try:
+        t   = _email_strings()
         ses = boto3.client('ses', region_name=CONFIG['BEDROCK_REGION'])
         ses.send_email(
             Source=CONFIG['SENDER_EMAIL'],
             Destination={'ToAddresses': [CONFIG['RECIPIENT_EMAIL']]},
             Message={
-                'Subject': {'Data': '[AWS] Weekly Digest 產生失敗', 'Charset': 'UTF-8'},
-                'Body':    {'Text': {'Data': f'錯誤：{error_msg}', 'Charset': 'UTF-8'}},
+                'Subject': {'Data': t['error_subject'], 'Charset': 'UTF-8'},
+                'Body':    {'Text': {'Data': t['error_body'].format(error_msg=error_msg), 'Charset': 'UTF-8'}},
             },
         )
     except Exception as e:
-        print(f'Error email 也寄失敗：{e}')
+        print(f'Could not send the error email either: {e}')
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 C：LinkedIn（預留，FEATURE_POST_TO_LINKEDIN=false）
-# 啟用步驟：
-#   1. 建立 LinkedIn Developer App，取得 OAuth Access Token
+# Output C: LinkedIn — off by default (FEATURE_POST_TO_LINKEDIN=false)
+# To switch it on:
+#   1. Create a LinkedIn developer app and get an OAuth access token
 #   2. aws ssm put-parameter --name /aws-weekly-digest/linkedin-access-token \
 #        --type SecureString --value <TOKEN>
 #   3. aws ssm put-parameter --name /aws-weekly-digest/linkedin-person-urn \
 #        --type String --value <URN>
-#   4. 設定環境變數 FEATURE_POST_TO_LINKEDIN=true
+#   4. Set FEATURE_POST_TO_LINKEDIN=true
 # ────────────────────────────────────────────────────────────
 def post_to_linkedin(content):
     ssm = boto3.client('ssm')
@@ -473,7 +648,7 @@ def post_to_linkedin(content):
         token  = ssm.get_parameter(Name='/aws-weekly-digest/linkedin-access-token', WithDecryption=True)['Parameter']['Value']
         urn    = ssm.get_parameter(Name='/aws-weekly-digest/linkedin-person-urn')['Parameter']['Value']
     except Exception as e:
-        print(f'[LinkedIn] 缺少 SSM 參數，跳過：{e}')
+        print(f'[LinkedIn] SSM parameters missing, skipping: {e}')
         return None
 
     post_text = markdown_to_linkedin(content)[:2950]
@@ -498,20 +673,20 @@ def post_to_linkedin(content):
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read())
-            print(f'[LinkedIn] 發文成功：{result.get("id")}')
+            print(f'[LinkedIn] posted: {result.get("id")}')
             return result.get('id')
     except Exception as e:
-        print(f'[LinkedIn] 發文失敗：{e}')
+        print(f'[LinkedIn] post failed: {e}')
         return None
 
 
 # ────────────────────────────────────────────────────────────
-# 輸出 D：Webhook（預留，FEATURE_POST_TO_WEBHOOK=false）
-# 啟用步驟：
-#   1. 建立 n8n / Make Webhook
+# Output D: generic webhook — off by default (FEATURE_POST_TO_WEBHOOK=false)
+# To switch it on:
+#   1. Create an n8n / Make webhook
 #   2. aws ssm put-parameter --name /aws-weekly-digest/webhook-url \
 #        --type SecureString --value <URL>
-#   3. 設定環境變數 FEATURE_POST_TO_WEBHOOK=true
+#   3. Set FEATURE_POST_TO_WEBHOOK=true
 # Payload: { title, content, linkedInText, s3Url, generatedAt }
 # ────────────────────────────────────────────────────────────
 def post_to_webhook(content, s3_url):
@@ -519,7 +694,7 @@ def post_to_webhook(content, s3_url):
     try:
         webhook_url = ssm.get_parameter(Name='/aws-weekly-digest/webhook-url', WithDecryption=True)['Parameter']['Value']
     except Exception as e:
-        print(f'[Webhook] 缺少 SSM 參數，跳過：{e}')
+        print(f'[Webhook] SSM parameter missing, skipping: {e}')
         return
 
     payload = json.dumps({
@@ -536,13 +711,13 @@ def post_to_webhook(content, s3_url):
     )
     try:
         with urllib.request.urlopen(req, timeout=15):
-            print('[Webhook] 已送出')
+            print('[Webhook] sent')
     except Exception as e:
-        print(f'[Webhook] 失敗：{e}')
+        print(f'[Webhook] failed: {e}')
 
 
 # ────────────────────────────────────────────────────────────
-# Markdown → HTML（Email 用，AWS 橘色主題）
+# Markdown → HTML for the email body (AWS orange theme)
 # ────────────────────────────────────────────────────────────
 def markdown_to_html(markdown):
     def _unescape(s):
@@ -580,7 +755,7 @@ def markdown_to_html(markdown):
 
 
 # ────────────────────────────────────────────────────────────
-# Markdown → LinkedIn 純文字
+# Markdown → plain text for LinkedIn
 # ────────────────────────────────────────────────────────────
 def markdown_to_linkedin(markdown):
     def _unescape(s):
@@ -608,7 +783,7 @@ def markdown_to_linkedin(markdown):
 
 
 # ────────────────────────────────────────────────────────────
-# 工具函式
+# Helpers
 # ────────────────────────────────────────────────────────────
 def _strip_html(text):
     if not text:

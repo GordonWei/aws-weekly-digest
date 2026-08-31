@@ -1,14 +1,15 @@
-# 無額外相依套件
-# 所有功能均使用 Python 標準函式庫 + boto3（Lambda 執行環境內建）
+# No third-party dependencies.
+# Everything runs on the Python standard library plus boto3, which the Lambda
+# runtime already ships.
 #
-# 使用的標準函式庫：
-#   urllib.request  — HTTP 抓取 RSS Feed
-#   xml.etree       — XML / RSS 解析
-#   html            — HTML 實體解碼
-#   re              — Regex 處理
-#   json            — Bedrock API payload
-#   os              — 環境變數讀取
-#   datetime        — 日期計算
+# Standard library used:
+#   urllib.request  — fetching the RSS feeds
+#   xml.etree       — XML / RSS parsing
+#   html            — HTML entity decoding
+#   re              — regex work
+#   json            — request/response payloads
+#   os              — reading environment variables
+#   datetime        — date arithmetic
 #
-# AWS SDK（Lambda 內建，不需打包）：
+# AWS SDK (bundled with the Lambda runtime, nothing to package):
 #   boto3           — Bedrock / SES / S3 / SSM
