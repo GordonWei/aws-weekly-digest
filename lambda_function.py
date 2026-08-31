@@ -18,9 +18,24 @@ from datetime import datetime, timedelta, timezone
 
 import boto3
 
+import account_context
+
 # ── Configuration (entirely environment-driven) ─────────────
 CONFIG = {
     'BEDROCK_MODEL_ID': os.environ.get('BEDROCK_MODEL_ID', 'us.amazon.nova-pro-v1:0'),
+
+    # The account advice section runs on its own model. It is a different job
+    # from writing the digest: the digest reformats material it was handed,
+    # while the advice has to cross-reference usage types against each other to
+    # be worth reading at all. Measured on the same prompt and data, Nova Pro
+    # spent three of five slots on "check your config, it might reduce costs"
+    # and missed an idle IPv4 address and two regions of NAT gateway; Claude
+    # Opus 5 derived that 2,160 = 24 x 90 (so a table was provisioned around the
+    # clock), that extended-support hours equalling cluster hours means the
+    # cluster was created on an already-expired version, and that snapshots in
+    # regions with no BoxUsage are leftovers from deleted instances. The
+    # difference is roughly $8/year at one run a week.
+    'ADVICE_MODEL_ID':  os.environ.get('ADVICE_MODEL_ID', 'us.anthropic.claude-opus-5'),
     'RECIPIENT_EMAIL':  os.environ.get('RECIPIENT_EMAIL', ''),
     'SENDER_EMAIL':     os.environ.get('SENDER_EMAIL', ''),
     'S3_BUCKET':        os.environ.get('S3_BUCKET', ''),
@@ -56,6 +71,7 @@ CONFIG = {
         'SAVE_TO_S3':             os.environ.get('FEATURE_SAVE_TO_S3',      'true') == 'true',
         'POST_TO_LINKEDIN':       os.environ.get('FEATURE_POST_TO_LINKEDIN','false') == 'true',
         'POST_TO_WEBHOOK':        os.environ.get('FEATURE_POST_TO_WEBHOOK', 'false') == 'true',
+        'ACCOUNT_ADVICE':         os.environ.get('FEATURE_ACCOUNT_ADVICE',  'false') == 'true',
     },
 }
 
@@ -75,6 +91,18 @@ def lambda_handler(event, context):
 
         digest_content = generate_digest(whats_new, blog_posts)
         print(f"{CONFIG['LLM_PROVIDER']} finished the analysis")
+
+        if CONFIG['FEATURES']['ACCOUNT_ADVICE']:
+            section, warn = account_context.build_advice_section(
+                CONFIG['DIGEST_LANGUAGE'], _invoke_advice_llm)
+            if warn:
+                # Loud on purpose. Losing this section should not lose the
+                # digest, but it must not vanish without saying so either —
+                # a silently absent section reads exactly like a week with
+                # nothing to report.
+                print(f'WARNING: {warn}')
+            digest_content += section
+            print('Account advice appended' if section else 'Account advice produced nothing')
 
         s3_url = None
         if CONFIG['FEATURES']['SAVE_TO_S3'] and CONFIG['S3_BUCKET']:
@@ -435,28 +463,63 @@ def _invoke_llm(prompt):
     )
 
 
-def _invoke_bedrock(prompt):
-    bedrock  = boto3.client('bedrock-runtime', region_name=CONFIG['BEDROCK_REGION'])
-    model_id = CONFIG['BEDROCK_MODEL_ID']
+# Claude models that removed the sampling parameters. Sending `temperature` to
+# one of these is a 400, not a warning — which is how the Claude branch below
+# used to fail the moment you pointed it at anything current.
+_NO_SAMPLING_CLAUDE = ('opus-5', 'opus-4-7', 'opus-4-8', 'sonnet-5', 'fable-5', 'mythos-5')
+
+# botocore's default read timeout is 60 seconds. Claude Opus 5 runs adaptive
+# thinking by default and goes straight past that on a prompt of any size; the
+# first run against it died on ReadTimeoutError rather than anything to do with
+# the request. Keep this under the Lambda function timeout so the error email
+# still gets sent.
+_BEDROCK_READ_TIMEOUT = int(os.environ.get('BEDROCK_READ_TIMEOUT', '240'))
+
+
+def _bedrock_client():
+    from botocore.config import Config
+    return boto3.client(
+        'bedrock-runtime',
+        region_name=CONFIG['BEDROCK_REGION'],
+        config=Config(read_timeout=_BEDROCK_READ_TIMEOUT, retries={'max_attempts': 2}),
+    )
+
+
+def _invoke_advice_llm(prompt):
+    """The account advice section, on its own model — see ADVICE_MODEL_ID.
+
+    A larger token ceiling than the digest: on a thinking model the budget
+    covers reasoning as well as the answer, and the first real run spent 5,702
+    output tokens on five recommendations.
+    """
+    return _invoke_bedrock(prompt, model_id=CONFIG['ADVICE_MODEL_ID'], max_tokens=16000)
+
+
+def _invoke_bedrock(prompt, model_id=None, max_tokens=None):
+    bedrock    = _bedrock_client()
+    model_id   = model_id or CONFIG['BEDROCK_MODEL_ID']
+    max_tokens = max_tokens or MAX_TOKENS
 
     if 'nova' in model_id or model_id.startswith('amazon'):
         body = json.dumps({
             'messages': [{'role': 'user', 'content': [{'text': prompt}]}],
-            'inferenceConfig': {'temperature': TEMPERATURE, 'maxTokens': MAX_TOKENS},
+            'inferenceConfig': {'temperature': TEMPERATURE, 'maxTokens': max_tokens},
         })
         response = bedrock.invoke_model(modelId=model_id, body=body)
         result   = json.loads(response['body'].read())
         return result['output']['message']['content'][0]['text']
     else:  # Claude on Bedrock
-        body = json.dumps({
+        payload = {
             'anthropic_version': 'bedrock-2023-05-31',
-            'max_tokens': MAX_TOKENS,
-            'temperature': TEMPERATURE,
+            'max_tokens': max_tokens,
             'messages': [{'role': 'user', 'content': prompt}],
-        })
-        response = bedrock.invoke_model(modelId=model_id, body=body)
+        }
+        if not any(m in model_id for m in _NO_SAMPLING_CLAUDE):
+            payload['temperature'] = TEMPERATURE
+        response = bedrock.invoke_model(modelId=model_id, body=json.dumps(payload))
         result   = json.loads(response['body'].read())
-        return result['content'][0]['text']
+        # Thinking models put a thinking block first; take the text blocks only.
+        return ''.join(b['text'] for b in result['content'] if b.get('type') == 'text')
 
 
 # ────────────────────────────────────────────────────────────

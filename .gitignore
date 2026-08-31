@@ -13,6 +13,11 @@ venv/
 # Internal working notes (deployment account, environment specifics) — not for publication
 WEEKLY_UPDATE.md
 
+# Design record for the account advice feature. Carries a full inventory of one
+# real account — regions, services, and the specific weaknesses found in it.
+# The public-facing rationale lives in README.md instead.
+docs/account_advice.md
+
 # OS
 .DS_Store
 Thumbs.db

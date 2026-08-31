@@ -28,6 +28,29 @@ Parameters:
     Description: Region to call Bedrock in (must be one where Bedrock is available)
     Default: us-east-1
 
+  # The account advice section runs on its own model — a different job from
+  # writing the digest, and one that a cheaper model measurably does not do
+  # well. See the ADVICE_MODEL_ID comment in lambda_function.py.
+  AdviceModelId:
+    Type: String
+    Description: Bedrock model for the account advice section (must be an inference profile ID)
+    Default: us.anthropic.claude-opus-5
+    AllowedValues:
+      - us.anthropic.claude-opus-5
+      - us.anthropic.claude-sonnet-5
+      - us.anthropic.claude-haiku-4-5-20251001-v1:0
+      - us.amazon.nova-pro-v1:0
+
+  # Claude Opus 5 runs adaptive thinking by default and comfortably exceeds
+  # botocore's 60-second default. Keep this below the function Timeout so the
+  # error notification still gets out.
+  BedrockReadTimeout:
+    Type: Number
+    Description: Seconds to wait on a Bedrock response. Must stay below the function timeout.
+    Default: 240
+    MinValue: 30
+    MaxValue: 800
+
   # ── LLM provider ─────────────────────────────────────────
   # Defaults to bedrock, which behaves exactly as it always has. Switch to
   # openai_compatible and LlmBaseUrl / LlmModel become required — one set of
@@ -102,11 +125,26 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
 
+  # Off by default: it costs Cost Explorer calls ($0.01 each) and a second model
+  # invocation, and it needs ce:GetCostAndUsage. With it off the function behaves
+  # exactly as it did before this existed.
+  FeatureAccountAdvice:
+    Type: String
+    Description: Append a section advising on this account's own usage
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+
 # ── Globals ───────────────────────────────────────────────
 Globals:
   Function:
+    # 600, not the previous 300. The digest itself measured ~118s, and the
+    # advice section adds a Claude Opus 5 call with adaptive thinking on top of
+    # it. At 300 the two together sat close enough to the ceiling that a slow
+    # week would have been cut off mid-run — and a Lambda killed by its own
+    # timeout never reaches the except block that sends the failure email, so
+    # the symptom would have been silence.
     Runtime: python3.12
-    Timeout: 300
+    Timeout: 600
     MemorySize: 256
     Architectures: [arm64]
 
@@ -171,7 +209,20 @@ Resources:
                   - 'arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0'
                   - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0'
                   - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
+                  # Underlying models for the AdviceModelId profiles. Same rule
+                  # as the note above: the foundation-model ARN carries no us. prefix.
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-5'
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5'
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
                   - !Sub 'arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/*'
+              # Cost Explorer — reading this account's own usage for the advice
+              # section. Cost Explorer has no resource-level permissions, so '*'
+              # is the only thing that can be written here; the actions are
+              # read-only. ce:GetCostAndUsage is billed at $0.01 per call.
+              - Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                Resource: '*'
               # SES — sending mail, restricted to the configured sender address
               - Effect: Allow
                 Action:
@@ -208,6 +259,8 @@ Resources:
         Variables:
           BEDROCK_MODEL_ID:     !Ref BedrockModelId
           BEDROCK_REGION:       !Ref BedrockRegion
+          ADVICE_MODEL_ID:      !Ref AdviceModelId
+          BEDROCK_READ_TIMEOUT: !Ref BedrockReadTimeout
           LLM_PROVIDER:         !Ref LlmProvider
           LLM_BASE_URL:         !Ref LlmBaseUrl
           LLM_MODEL:            !Ref LlmModel
@@ -224,6 +277,7 @@ Resources:
           FEATURE_SAVE_TO_S3:      !Ref FeatureSaveToS3
           FEATURE_POST_TO_LINKEDIN: !Ref FeaturePostToLinkedIn
           FEATURE_POST_TO_WEBHOOK:  !Ref FeaturePostToWebhook
+          FEATURE_ACCOUNT_ADVICE:   !Ref FeatureAccountAdvice
       # No function URL — the real trigger is the EventBridge Scheduler below.
       # For a manual run, invoke the function directly.
 

@@ -68,11 +68,45 @@ All settings are environment variables on the Lambda, set through SAM parameters
 | `LLM_BASE_URL` | `''` | Required for `openai_compatible` |
 | `LLM_MODEL` | `''` | Required for `openai_compatible` |
 | `LLM_API_KEY_PARAM` | `/aws-weekly-digest/llm-api-key` | SSM path. Set to empty string to declare "no auth needed" (e.g. local LM Studio) |
-| `LLM_TIMEOUT` | `240` | Seconds to wait on the LLM. Keep it under the 300s function timeout, or Lambda dies before the call gives up and you lose the failure email with it |
+| `LLM_TIMEOUT` | `240` | Seconds to wait on the LLM. Keep it under the 600s function timeout, or Lambda dies before the call gives up and you lose the failure email with it |
 | `DIGEST_LANGUAGE` | `en` | `en` or `zh-TW`. See below |
+| `ADVICE_MODEL_ID` | `us.anthropic.claude-opus-5` | Model for the account advice section. Must be an inference profile ID |
+| `BEDROCK_READ_TIMEOUT` | `240` | botocore's 60s default is not enough for a thinking model |
+| `ACCOUNT_ADVICE_LOOKBACK_DAYS` | `90` | Cost Explorer window for the advice section |
+| `ACCOUNT_ADVICE_MAX_ACCOUNTS` | `5` | In an organization, how many linked accounts get a usage breakdown |
 
 Feature flags: `FEATURE_SEND_EMAIL`, `FEATURE_EMBED_CONTENT`,
-`FEATURE_SAVE_TO_S3`, `FEATURE_POST_TO_LINKEDIN`, `FEATURE_POST_TO_WEBHOOK`.
+`FEATURE_SAVE_TO_S3`, `FEATURE_POST_TO_LINKEDIN`, `FEATURE_POST_TO_WEBHOOK`,
+`FEATURE_ACCOUNT_ADVICE`.
+
+### Account advice (off by default)
+
+`FEATURE_ACCOUNT_ADVICE=true` appends a section that reads your account's own
+Cost Explorer usage and says what is worth fixing. It needs `ce:GetCostAndUsage`
+(already in the template) and costs $0.01 per Cost Explorer call plus one extra
+model invocation — around $9/year at one run a week on Claude Opus 5.
+
+It is built on **usage types**, not spend. A list of service names gives a model
+nothing to reason from but the names, and it will write "you may not have
+configured X, consider configuring X" for every line — a sentence true of every
+account. `PublicIPv4:IdleAddress`, `AmazonEKS-Hours:extendedSupport` and
+`NatGateway-Hours` each say something specific and checkable. Detection of those
+is pattern matching in `account_context.py`, not something the model is asked to
+spot; the model's job is to explain what was found.
+
+In an AWS Organization it fetches the top `ACCOUNT_ADVICE_MAX_ACCOUNTS` linked
+accounts separately and labels every finding with its account, because advice
+that names a problem without naming the account it lives in is not actionable.
+Accounts past that limit are listed with spend only, and the prompt says so.
+
+**The model choice matters more than the cost here.** On identical data, Nova
+Pro spent three of five slots on "check your config, it might reduce costs" and
+missed an idle IPv4 address; Claude Opus 5 worked out that 2,160 hours = 90 days
+× 24 (a table provisioned around the clock), that extended-support hours equal to
+cluster hours mean the cluster was created on an already-expired version, and
+that snapshots in regions with no `BoxUsage` are leftovers from deleted
+instances. Set `ADVICE_MODEL_ID` to a cheaper model if you want, but that is
+what you are trading away.
 
 ### Digest language
 
