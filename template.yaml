@@ -53,6 +53,15 @@ Parameters:
     Description: 'SSM parameter path holding the API key. Set it to an empty string to say the endpoint needs no auth (a local LM Studio, say).'
     Default: /aws-weekly-digest/llm-api-key
 
+  # Keep this under the function Timeout in Globals (300), otherwise Lambda dies
+  # before the HTTP call gives up and you lose the error notification with it.
+  LlmTimeout:
+    Type: Number
+    Description: Seconds to wait on the LLM endpoint. Must stay below the function timeout.
+    Default: 240
+    MinValue: 30
+    MaxValue: 290
+
   # Language the digest is written in. Each value has its own prompt in
   # lambda_function.py rather than a "reply in X" suffix, so adding one means
   # adding a builder there and a value here.
@@ -203,6 +212,7 @@ Resources:
           LLM_BASE_URL:         !Ref LlmBaseUrl
           LLM_MODEL:            !Ref LlmModel
           LLM_API_KEY_PARAM:    !Ref LlmApiKeyParam
+          LLM_TIMEOUT:          !Ref LlmTimeout
           DIGEST_LANGUAGE:      !Ref DigestLanguage
           RECIPIENT_EMAIL:      !Ref RecipientEmail
           SENDER_EMAIL:         !Ref SenderEmail

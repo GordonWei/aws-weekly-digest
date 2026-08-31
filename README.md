@@ -68,7 +68,7 @@ All settings are environment variables on the Lambda, set through SAM parameters
 | `LLM_BASE_URL` | `''` | Required for `openai_compatible` |
 | `LLM_MODEL` | `''` | Required for `openai_compatible` |
 | `LLM_API_KEY_PARAM` | `/aws-weekly-digest/llm-api-key` | SSM path. Set to empty string to declare "no auth needed" (e.g. local LM Studio) |
-| `LLM_TIMEOUT` | `240` | Seconds. Lambda timeout is 300 |
+| `LLM_TIMEOUT` | `240` | Seconds to wait on the LLM. Keep it under the 300s function timeout, or Lambda dies before the call gives up and you lose the failure email with it |
 | `DIGEST_LANGUAGE` | `en` | `en` or `zh-TW`. See below |
 
 Feature flags: `FEATURE_SEND_EMAIL`, `FEATURE_EMBED_CONTENT`,

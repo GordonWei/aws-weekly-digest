@@ -20,5 +20,5 @@ capabilities = "CAPABILITY_NAMED_IAM"
 # Careful: parameter_overrides is one flat string. Drop a parameter from it and
 # CloudFormation silently falls back to the template default instead of telling
 # you anything — pass all of them every time.
-parameter_overrides = "RecipientEmail=\"you@example.com\" SenderEmail=\"you@example.com\" BedrockModelId=\"us.amazon.nova-pro-v1:0\" BedrockRegion=\"us-east-1\" DaysLookback=\"7\" FeatureSendEmail=\"true\" FeatureEmbedContent=\"true\" FeatureSaveToS3=\"true\" FeaturePostToLinkedIn=\"false\" FeaturePostToWebhook=\"false\" DigestLanguage=\"en\""
+parameter_overrides = "RecipientEmail=\"you@example.com\" SenderEmail=\"you@example.com\" BedrockModelId=\"us.amazon.nova-pro-v1:0\" BedrockRegion=\"us-east-1\" DaysLookback=\"7\" FeatureSendEmail=\"true\" FeatureEmbedContent=\"true\" FeatureSaveToS3=\"true\" FeaturePostToLinkedIn=\"false\" FeaturePostToWebhook=\"false\" DigestLanguage=\"en\" LlmTimeout=\"240\""
 image_repositories = []
