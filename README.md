@@ -89,9 +89,12 @@ Careful with that: `parameter_overrides` in `samconfig.toml` is one flat string,
 and dropping a parameter from it makes CloudFormation quietly fall back to the
 template default rather than telling you. Pass the whole set every time.
 
-The email wrapper — subject line, the counts under the header, the footer —
-follows the same setting (`_EMAIL_STRINGS`), so you do not end up with an
-English digest inside a Chinese-labelled email.
+One setting covers everything a reader sees. The email wrapper — subject lines,
+the counts under the header, the footer, the plain-text part, the failure
+notification — comes from `_EMAIL_STRINGS` keyed on the same value, so you never
+end up with an English digest inside a Chinese-labelled email. Code comments and
+CloudWatch log lines stay in English regardless; those are for whoever is
+reading the repo, not for the recipient.
 
 Each language has its own prompt in `lambda_function.py` (`_prompt_en`,
 `_prompt_zh_tw`) rather than one English prompt with "reply in X" appended. The

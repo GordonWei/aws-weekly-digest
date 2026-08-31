@@ -558,6 +558,7 @@ def save_to_s3(content):
 # ────────────────────────────────────────────────────────────
 _EMAIL_STRINGS = {
     'en': {
+        'subject':      '[AWS] Weekly Digest {today}',
         's3_link':      'Raw archive in S3',
         'subhead':      "{today} | {wn_count} What's New, {blog_count} blog posts",
         'footer':       'AWS Weekly Digest Bot — generated automatically, read it before you share it',
@@ -566,6 +567,7 @@ _EMAIL_STRINGS = {
         'error_body':   'Error: {error_msg}',
     },
     'zh-TW': {
+        'subject':      '[AWS] Weekly Digest {today}',
         's3_link':      'S3 原始存檔',
         'subhead':      "{today}｜What's New {wn_count} 條，Blog {blog_count} 篇",
         'footer':       'AWS Weekly Digest Bot｜自動產生，請審閱後再分享',
@@ -607,7 +609,7 @@ def send_email(digest_content, s3_url, wn_count, blog_count):
         Source=CONFIG['SENDER_EMAIL'],
         Destination={'ToAddresses': [CONFIG['RECIPIENT_EMAIL']]},
         Message={
-            'Subject': {'Data': f'[AWS] Weekly Digest {today}', 'Charset': 'UTF-8'},
+            'Subject': {'Data': t['subject'].format(today=today), 'Charset': 'UTF-8'},
             'Body': {
                 'Html': {'Data': html_body,                        'Charset': 'UTF-8'},
                 'Text': {'Data': t['text_part'].format(today=today), 'Charset': 'UTF-8'},
