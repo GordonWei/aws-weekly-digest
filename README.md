@@ -3,8 +3,9 @@
 > **TL;DR** — A Lambda that runs every Friday, pulls the AWS What's New and
 > AWS News Blog RSS feeds for the past week, hands them to an LLM to write a
 > categorized digest, then emails it to you and archives a copy in S3.
-> Deployed with SAM. No dependencies beyond boto3 and the Python standard
-> library.
+> Optionally it also reads **your own account's Cost Explorer usage** and adds a
+> section on what is worth fixing in it. Deployed with SAM. No dependencies
+> beyond boto3 and the Python standard library.
 
 The LLM can be Amazon Bedrock (default) or any OpenAI-compatible endpoint —
 Gemini, a local LM Studio instance, a self-hosted LiteLLM — via a single
@@ -18,10 +19,19 @@ did. It is a small personal tool, not a product.
 ```
   AWS What's New RSS  ─┐
                        ├─→  Lambda (Python 3.12, arm64)  ─→  LLM  ─┬─→  SES  → your inbox
-  AWS News Blog RSS   ─┘         ▲                                 └─→  S3   → digests/<date>/
-                                 │
+  AWS News Blog RSS   ─┘         ▲            │                    └─→  S3   → digests/<date>/
+                                 │            └─→  Cost Explorer  ─→  LLM  ─→  advice section
+                                 │                 (optional)              (appended to the digest)
                     EventBridge Scheduler (Fri 17:00 Asia/Taipei)
 ```
+
+The digest itself is the same for everyone. The optional **account advice**
+section is the part that is specific to you: it reads which services and usage
+types your account actually billed over the last 90 days and says what is worth
+fixing — idle IPv4 addresses, clusters on extended support, NAT gateways left
+behind, provisioned capacity nothing is using. Off by default
+(`FEATURE_ACCOUNT_ADVICE`); see [Account advice](#account-advice-off-by-default)
+for how it works and why it is built on usage types rather than spend.
 
 Two optional output channels — LinkedIn and a generic webhook — are wired up
 but off by default. See the feature flags below.
@@ -228,6 +238,15 @@ forever, and `StatusCode: 200` is not a test result.
   does not.
 - The LinkedIn and webhook channels are written but off by default and have seen
   much less use than email and S3.
+- The account advice section sees billing data only. It knows what your account
+  used and how much; it cannot see a single configuration value, so it is told
+  to say when it is inferring and never to guess at settings.
+- Its flagged-signal list is five patterns long. Those five mean the same thing
+  in every account, which is why they are matched in code — but plenty of other
+  waste has no such tell and will only be caught if the model happens to spot it.
+- On an account inside the free tier the advice is technically correct and
+  financially pointless. The findings are real; the amounts are rounding errors.
+  It gets useful in proportion to how much you actually run.
 
 ## License
 
