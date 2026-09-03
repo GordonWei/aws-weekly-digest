@@ -169,11 +169,14 @@ arrives in the new language with the advice section still in English — an
 unknown language raises at run time, but a *missing* one there returns a warning
 and no section, which is quieter than it sounds.
 
-## Two traps worth knowing about
+## Four traps worth knowing about
 
-Both of these survived `sam build` and `sam validate` and only showed up on a
-real invoke. If you are building something similar, these are the parts of this
-repo actually worth your time.
+The first two survived `sam build` and `sam validate` and only showed up on a
+real invoke. The last two are quieter still — this account is too small to ever
+trigger either one, so they were found by asking "would this hold up on a
+bigger account?" before publishing the code, not by watching anything break.
+If you are building something similar, these are the parts of this repo
+actually worth your time.
 
 ### 1. Cross-Region Inference profile IDs are not model ARNs
 
@@ -243,6 +246,29 @@ clean = re.sub(r'</?[a-zA-Z0-9]+:', lambda m: m.group(0).replace(':', ''), clean
 
 A `try/except` written for resilience is also a great place for a bug to live
 forever, and `StatusCode: 200` is not a test result.
+
+### 3. Cost Explorer's 1,000-group cap has no pagination by default
+
+`GetCostAndUsage` returns at most 1,000 groups per call and signals more data
+is available with a `NextPageToken` — it does not raise, warn, or otherwise
+tell you anything was cut. The original `account_context.py` only ever read
+the first page. On this account, `SERVICE + USAGE_TYPE` never comes close to
+1,000 groups, so this never fired here. It would on a large-enough account,
+and the symptom would be a shorter-than-it-should-be usage list that looks
+completely normal — advice generated from it would simply never mention
+whatever fell off the end. Fixed with a loop over `NextPageToken` until it
+comes back empty.
+
+### 4. Flagging ran against the truncated display list, not the full one
+
+Each service's usage types are trimmed to the top 4 by cost for display, to
+keep the prompt readable. `flag_usage_types()` was iterating that same
+trimmed list — which means the smallest, most-signal-bearing usage types were
+exactly the ones most likely to be cut before the flagging logic ever saw
+them. `PublicIPv4:IdleAddress` sits at usage `0.089` on this account, nowhere
+near a top-4-by-cost cutoff. Fixed by scanning `all_usage_types` (the
+untruncated set) for flags while still only *displaying* the top 4 per
+service. On this same account, the flag count went from 7 to 14.
 
 ## Limitations
 
