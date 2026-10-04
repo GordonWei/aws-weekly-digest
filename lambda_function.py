@@ -491,21 +491,108 @@ def _bedrock_client():
     )
 
 
+ADVICE_MAX_TOKENS = 16000
+
+# Ceiling for the one retry after a response stops at max_tokens. Measured: the
+# Claude 5 generation needs 11,400 to 12,400 output tokens for the digest once
+# adaptive thinking is counted, so 8,192 cuts every run and 32,000 finished all
+# 24 test runs. It stays a non-streaming call, which is fine at this size and
+# inside BEDROCK_READ_TIMEOUT.
+RETRY_MAX_TOKENS = 32000
+
+# Output ceilings per model, matched by substring of the model ID. Asking for
+# more than the ceiling is a ValidationException, not a quiet clamp: Nova
+# rejects anything above 10,240, so the 16,000 the advice call used to send
+# failed on every run. A model not listed here gets what was asked for.
+_MAX_OUTPUT_TOKENS = (
+    ('nova',                 10240),   # Micro / Lite / Pro, measured
+    ('claude-3-haiku',        4096),
+    ('claude-haiku-4-5',     64000),
+    ('claude-opus-5',       128000),   # also matches claude-opus-5-5
+    ('claude-sonnet-5',     128000),   # also matches claude-sonnet-5-5
+)
+
+# What a cut-off response looks like in each API.
+_TRUNCATED_STOP_REASONS = ('max_tokens', 'length')
+
+_TRUNCATION_NOTICE = {
+    'en':    ('\n\n> **Note: this section was cut off.** The model ({model}) stopped at its '
+              'output limit before finishing, so anything after this point is missing.\n'),
+    'zh-TW': ('\n\n> **注意：本段內容不完整。** 模型（{model}）在寫完之前就用完了輸出上限，'
+              '此處之後的內容遺失。\n'),
+}
+
+
+def _max_output_tokens(model_id):
+    for marker, limit in _MAX_OUTPUT_TOKENS:
+        if marker in model_id:
+            return limit
+    return None
+
+
+def _clamp_max_tokens(model_id, requested):
+    limit = _max_output_tokens(model_id)
+    return min(requested, limit) if limit else requested
+
+
+def _truncation_notice(model):
+    template = _TRUNCATION_NOTICE.get(CONFIG['DIGEST_LANGUAGE'], _TRUNCATION_NOTICE['en'])
+    return template.format(model=model)
+
+
 def _invoke_advice_llm(prompt):
     """The account advice section, on its own model — see ADVICE_MODEL_ID.
 
     A larger token ceiling than the digest: on a thinking model the budget
     covers reasoning as well as the answer, and the first real run spent 5,702
-    output tokens on five recommendations.
+    output tokens on five recommendations. _invoke_bedrock clamps it to what the
+    chosen model accepts.
     """
-    return _invoke_bedrock(prompt, model_id=CONFIG['ADVICE_MODEL_ID'], max_tokens=16000)
+    return _invoke_bedrock(prompt, model_id=CONFIG['ADVICE_MODEL_ID'], max_tokens=ADVICE_MAX_TOKENS)
 
 
 def _invoke_bedrock(prompt, model_id=None, max_tokens=None):
-    bedrock    = _bedrock_client()
-    model_id   = model_id or CONFIG['BEDROCK_MODEL_ID']
-    max_tokens = max_tokens or MAX_TOKENS
+    """Call Bedrock and return the text, checked for the two silent failures.
 
+    A response that stopped at max_tokens is retried once with a higher
+    ceiling. If it is still cut off, the text goes out with a visible notice
+    at the end and a WARNING in the log, because a partial digest is still
+    worth reading but must not look complete. A response with no text at all
+    is an error, and goes the same way as any other LLM failure: the error
+    email. Measured on the Claude 5 generation at 8,192: every run was cut
+    off, and one spent the whole budget thinking and returned nothing.
+    """
+    bedrock   = _bedrock_client()
+    model_id  = model_id or CONFIG['BEDROCK_MODEL_ID']
+    requested = max_tokens or MAX_TOKENS
+    budget    = _clamp_max_tokens(model_id, requested)
+    if budget < requested:
+        print(f'{model_id}: max_tokens {requested} is above this model\'s limit, using {budget}')
+
+    text, stop_reason = _bedrock_call(bedrock, model_id, prompt, budget)
+
+    if stop_reason in _TRUNCATED_STOP_REASONS:
+        retry_budget = _clamp_max_tokens(model_id, max(RETRY_MAX_TOKENS, budget * 2))
+        if retry_budget > budget:
+            print(f'WARNING: {model_id} stopped at max_tokens={budget}; '
+                  f'retrying once with max_tokens={retry_budget}')
+            budget = retry_budget
+            text, stop_reason = _bedrock_call(bedrock, model_id, prompt, budget)
+
+    if not text or not text.strip():
+        raise RuntimeError(f'{model_id} returned no text '
+                           f'(stop_reason={stop_reason!r}, max_tokens={budget})')
+
+    if stop_reason in _TRUNCATED_STOP_REASONS:
+        print(f'WARNING: {model_id} output is still cut off at max_tokens={budget}; '
+              f'sending it marked as incomplete')
+        text += _truncation_notice(model_id)
+
+    return text
+
+
+def _bedrock_call(bedrock, model_id, prompt, max_tokens):
+    """One invoke_model call. Returns (text, stop_reason)."""
     if 'nova' in model_id or model_id.startswith('amazon'):
         body = json.dumps({
             'messages': [{'role': 'user', 'content': [{'text': prompt}]}],
@@ -513,7 +600,9 @@ def _invoke_bedrock(prompt, model_id=None, max_tokens=None):
         })
         response = bedrock.invoke_model(modelId=model_id, body=body)
         result   = json.loads(response['body'].read())
-        return result['output']['message']['content'][0]['text']
+        content  = result.get('output', {}).get('message', {}).get('content') or []
+        text     = ''.join(b.get('text', '') for b in content)
+        return text, result.get('stopReason')
     else:  # Claude on Bedrock
         payload = {
             'anthropic_version': 'bedrock-2023-05-31',
@@ -525,7 +614,8 @@ def _invoke_bedrock(prompt, model_id=None, max_tokens=None):
         response = bedrock.invoke_model(modelId=model_id, body=json.dumps(payload))
         result   = json.loads(response['body'].read())
         # Thinking models put a thinking block first; take the text blocks only.
-        return ''.join(b['text'] for b in result['content'] if b.get('type') == 'text')
+        text = ''.join(b['text'] for b in result.get('content', []) if b.get('type') == 'text')
+        return text, result.get('stop_reason')
 
 
 # ────────────────────────────────────────────────────────────
@@ -596,9 +686,18 @@ def _invoke_openai_compatible(prompt):
     except Exception as e:
         raise RuntimeError(f'Unexpected response shape from {model}: {raw[:500]}') from e
 
+    finish_reason = result['choices'][0].get('finish_reason')
     if not content or not content.strip():
-        raise RuntimeError(f'{model} returned empty content (finish_reason='
-                           f'{result["choices"][0].get("finish_reason")!r})')
+        raise RuntimeError(f'{model} returned empty content (finish_reason={finish_reason!r})')
+
+    # No retry here: the endpoint's output limit is unknown from this side.
+    # A local reasoning model can also be cut off and still report "stop",
+    # because its reasoning was stripped before the visible text ran out;
+    # nothing in the response can catch that case.
+    if finish_reason in _TRUNCATED_STOP_REASONS:
+        print(f'WARNING: {model} output was cut off at max_tokens={MAX_TOKENS}; '
+              f'sending it marked as incomplete')
+        content += _truncation_notice(model)
 
     return content
 

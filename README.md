@@ -86,14 +86,14 @@ All settings are environment variables on the Lambda, set through SAM parameters
 | `DAYS_LOOKBACK` | `7` | How far back to pull feed items |
 | `MAX_WHATS_NEW` | `80` | Cap on What's New items sent to the model |
 | `BEDROCK_REGION` | `us-east-1` | Also the region used for SES |
-| `BEDROCK_MODEL_ID` | `us.amazon.nova-pro-v1:0` | Nova and Claude payload shapes are both handled |
+| `BEDROCK_MODEL_ID` | `us.amazon.nova-pro-v1:0` | Nova and Claude payload shapes are both handled. The SAM template allows Nova Pro, Nova Lite and Claude 3 Haiku (Claude 3.5 Sonnet was removed: it is no longer in the us-east-1 inference profile list). `max_tokens` is clamped to what each model accepts; a reply that stops at the limit is retried once with a higher ceiling, and if it is still cut off it is sent with a visible note saying so |
 | `LLM_PROVIDER` | `bedrock` | Or `openai_compatible` |
 | `LLM_BASE_URL` | `''` | Required for `openai_compatible` |
 | `LLM_MODEL` | `''` | Required for `openai_compatible` |
 | `LLM_API_KEY_PARAM` | `/aws-weekly-digest/llm-api-key` | SSM path. Set to empty string to declare "no auth needed" (e.g. local LM Studio) |
 | `LLM_TIMEOUT` | `240` | Seconds to wait on the LLM. Keep it under the 600s function timeout, or Lambda dies before the call gives up and you lose the failure email with it |
 | `DIGEST_LANGUAGE` | `en` | `en` or `zh-TW`. See below |
-| `ADVICE_MODEL_ID` | `us.anthropic.claude-opus-5` | Model for the account advice section. Must be an inference profile ID |
+| `ADVICE_MODEL_ID` | `us.anthropic.claude-opus-5` | Model for the account advice section. Must be an inference profile ID. If this call fails for any reason, the section is left out with a WARNING in the log and the digest still goes out |
 | `BEDROCK_READ_TIMEOUT` | `240` | botocore's 60s default is not enough for a thinking model |
 | `ACCOUNT_ADVICE_LOOKBACK_DAYS` | `90` | Cost Explorer window for the advice section |
 | `ACCOUNT_ADVICE_MAX_ACCOUNTS` | `5` | In an organization, how many linked accounts get a usage breakdown |

@@ -440,15 +440,24 @@ def build_advice_section(lang, invoke_llm):
     parse error and mailed a permanently empty section for weeks, so the failure
     comes back as a warning for the caller to log and surface, rather than being
     quietly absorbed here.
+
+    "Never raises" covers the model call too. It used to cover only the Cost
+    Explorer half, so a model that rejected the request (Nova with too high a
+    max_tokens) took the digest down with it and the run mailed the error
+    notice instead.
     """
+    try:
+        return _build_advice_section(lang, invoke_llm)
+    except Exception as e:                                    # noqa: BLE001
+        return '', f'account advice skipped: {type(e).__name__}: {e}'
+
+
+def _build_advice_section(lang, invoke_llm):
     builder = _ADVICE_PROMPTS.get(lang)
     if builder is None:
         return '', f'no advice prompt for DIGEST_LANGUAGE={lang!r}'
 
-    try:
-        services, flags, scope_note = _collect(lang)
-    except Exception as e:                                    # noqa: BLE001
-        return '', f'account advice skipped: {type(e).__name__}: {e}'
+    services, flags, scope_note = _collect(lang)
 
     if not services:
         return '', 'account advice skipped: Cost Explorer returned no services'
