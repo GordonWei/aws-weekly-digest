@@ -40,7 +40,7 @@ CONFIG = {
     # clock), that extended-support hours equalling cluster hours means the
     # cluster was created on an already-expired version, and that snapshots in
     # regions with no BoxUsage are leftovers from deleted instances. The
-    # difference is roughly $8/year at one run a week.
+    # difference is roughly $9.20/year at one run a week.
     'ADVICE_MODEL_ID':  os.environ.get('ADVICE_MODEL_ID', 'us.anthropic.claude-opus-5'),
     'RECIPIENT_EMAIL':  os.environ.get('RECIPIENT_EMAIL', ''),
     'SENDER_EMAIL':     os.environ.get('SENDER_EMAIL', ''),
