@@ -730,6 +730,7 @@ _EMAIL_STRINGS = {
         's3_link':      'Raw archive in S3',
         'subhead':      "{today} | {wn_count} What's New, {blog_count} blog posts",
         'footer':       'AWS Weekly Digest Bot — generated automatically, read it before you share it',
+        'link_label':   'Read more ↗',
         'text_part':    'AWS Weekly Digest {today}\n(this email is meant to be read as HTML)',
         'error_subject':'[AWS] Weekly Digest failed',
         'error_body':   'Error: {error_msg}',
@@ -739,6 +740,7 @@ _EMAIL_STRINGS = {
         's3_link':      'S3 原始存檔',
         'subhead':      "{today}｜What's New {wn_count} 條，Blog {blog_count} 篇",
         'footer':       'AWS Weekly Digest Bot｜自動產生，請審閱後再分享',
+        'link_label':   '官方公告 ↗',
         'text_part':    'AWS Weekly Digest {today}\n（請以 HTML 郵件查看）',
         'error_subject':'[AWS] Weekly Digest 產生失敗',
         'error_body':   '錯誤：{error_msg}',
@@ -755,7 +757,8 @@ def send_email(digest_content, s3_url, wn_count, blog_count):
     t       = _email_strings()
     s3_link = (f'<p style="margin:12px 0"><a href="{s3_url}" style="color:#FF9900;font-weight:600">{t["s3_link"]}</a></p>'
                if s3_url else '')
-    body_html = markdown_to_html(digest_content) if CONFIG['FEATURES']['EMBED_CONTENT_IN_EMAIL'] else ''
+    body_html = (markdown_to_html(digest_content, link_label=t['link_label'])
+                 if CONFIG['FEATURES']['EMBED_CONTENT_IN_EMAIL'] else '')
 
     html_body = f"""
 <div style="font-family:-apple-system,Arial,sans-serif;max-width:680px;margin:0 auto;color:#232F3E">
@@ -889,10 +892,21 @@ def post_to_webhook(content, s3_url):
 # ────────────────────────────────────────────────────────────
 # Markdown → HTML for the email body (AWS orange theme)
 # ────────────────────────────────────────────────────────────
-def markdown_to_html(markdown):
+_MD_LINK = re.compile(r'\[([^\]]+)\]\((https?://[^)\s]+)\)')
+
+
+def markdown_to_html(markdown, link_label='Read more ↗'):
     def _unescape(s):
         return s.replace(r'\*','*').replace(r'\_','_').replace(r'\#','#').replace(r'\[','[').replace(r'\]',']')
+    def _link(m):
+        # The model writes official links as [url](url). Showing the URL twice is
+        # unreadable in a mail client, so a bare-URL label becomes link_label.
+        text, url = m.group(1), m.group(2)
+        label = link_label if text.strip() == url or text.startswith('http') else text
+        return (f'<a href="{html.escape(url, quote=True)}" '
+                f'style="color:#0073BB;text-decoration:none">{label}</a>')
     def _bold(s):
+        s = _MD_LINK.sub(_link, s)
         return re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', s)
 
     out = []
